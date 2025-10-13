@@ -1,0 +1,1 @@
+# Tests for WeChat MP Material Cleaner
