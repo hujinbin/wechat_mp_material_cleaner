@@ -1,0 +1,2 @@
+# wechat_mp_material_cleaner
+微信公众号图片素材批量删除工具
