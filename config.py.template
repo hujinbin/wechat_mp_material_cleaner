@@ -1,0 +1,6 @@
+# 微信公众号的 AppID 和 AppSecret
+# 这是一个模板文件，请复制一份并重命名为 config.py
+# 然后在 config.py 中替换成你自己的真实信息
+
+APP_ID = "your_appid"
+APP_SECRET = "your_appsecret"
