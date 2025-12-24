@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wechat-mp-material-cleaner"
+version = "1.0.0"
+description = "微信公众号图片素材批量删除工具"
+authors = [{name = "胡金斌", email = "hujinbin@example.com"}]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.7"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+dependencies = [
+    "requests>=2.25.0",
+    "click>=8.0.0",
+    "python-dotenv>=0.19.0",
+    "colorama>=0.4.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov",
+    "black",
+    "flake8",
+]
+
+[project.scripts]
+wechat-cleaner = "wechat_mp_cleaner.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/hujinbin/wechat_mp_material_cleaner"
+Repository = "https://github.com/hujinbin/wechat_mp_material_cleaner"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["wechat_mp_cleaner*"]
+
+[tool.black]
+line-length = 88
+target-version = ['py37']
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
