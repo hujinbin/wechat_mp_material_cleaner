@@ -1,8 +1,18 @@
 import asyncio
 import aiohttp
+import argparse
+import json
+import re
 import sys
 import time
-from config import APP_ID, APP_SECRET
+from pathlib import Path
+
+import config as cfg
+
+APP_ID = cfg.APP_ID
+APP_SECRET = cfg.APP_SECRET
+
+UNICODE_ESCAPE_PATTERN = re.compile(r"(\\u[0-9a-fA-F]{4}|\\U[0-9a-fA-F]{8}|\\x[0-9a-fA-F]{2})")
 
 class WxManager:
     """
@@ -78,6 +88,140 @@ class WxManager:
         except aiohttp.ClientError as e:
             print(f"获取素材列表时网络错误: {e}")
             return None
+
+    async def _post_json(self, url, payload):
+        """发送 POST JSON 请求并返回 JSON 数据。"""
+        session = await self.get_session()
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+        async with session.post(url, data=body, headers=headers) as response:
+            response.raise_for_status()
+            return await response.json(content_type=None)
+
+    async def add_draft(self, articles):
+        """创建图文草稿，返回草稿 media_id。"""
+        token = await self._get_access_token()
+        url = f"https://api.weixin.qq.com/cgi-bin/draft/add?access_token={token}"
+        payload = {"articles": articles}
+
+        try:
+            result = await self._post_json(url, payload)
+        except aiohttp.ClientError as e:
+            raise Exception(f"创建草稿时网络错误: {e}")
+
+        if "media_id" in result:
+            print(f"创建草稿成功，media_id: {result['media_id']}")
+            return result["media_id"]
+
+        raise Exception(f"创建草稿失败: {result.get('errmsg', '未知错误')}")
+
+    async def upload_permanent_image(self, image_path):
+        """上传永久图片素材，返回 media_id。"""
+        path = Path(image_path).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(f"封面图片不存在: {path}")
+
+        token = await self._get_access_token()
+        url = f"https://api.weixin.qq.com/cgi-bin/material/add_material?access_token={token}&type=image"
+
+        data = aiohttp.FormData()
+        with path.open("rb") as fp:
+            data.add_field("media", fp, filename=path.name, content_type="application/octet-stream")
+            session = await self.get_session()
+            try:
+                async with session.post(url, data=data) as response:
+                    response.raise_for_status()
+                    result = await response.json(content_type=None)
+            except aiohttp.ClientError as e:
+                raise Exception(f"上传封面图片时网络错误: {e}")
+
+        media_id = result.get("media_id")
+        if media_id:
+            print(f"封面图片上传成功，media_id: {media_id}")
+            return media_id
+
+        raise Exception(f"上传封面图片失败: {result.get('errmsg', '未知错误')}")
+
+    async def get_first_image_media_id(self):
+        """获取素材库第一张永久图片的 media_id。"""
+        token = await self._get_access_token()
+        url = f"https://api.weixin.qq.com/cgi-bin/material/batchget_material?access_token={token}"
+        payload = {"type": "image", "offset": 0, "count": 1}
+
+        try:
+            result = await self._post_json(url, payload)
+        except aiohttp.ClientError as e:
+            raise Exception(f"查询图片素材时网络错误: {e}")
+
+        items = result.get("item", [])
+        if items:
+            media_id = items[0].get("media_id", "")
+            if media_id:
+                print(f"已自动选取素材库第一张图片 media_id: {media_id}")
+                return media_id
+
+        return ""
+
+    async def publish_draft(self, media_id):
+        """提交草稿发布，返回 publish_id。"""
+        token = await self._get_access_token()
+        url = f"https://api.weixin.qq.com/cgi-bin/freepublish/submit?access_token={token}"
+        payload = {"media_id": media_id}
+
+        try:
+            result = await self._post_json(url, payload)
+        except aiohttp.ClientError as e:
+            raise Exception(f"提交发布时网络错误: {e}")
+
+        if "publish_id" in result:
+            print(f"已提交发布，publish_id: {result['publish_id']}")
+            return result["publish_id"]
+
+        raise Exception(f"提交发布失败: {result.get('errmsg', '未知错误')}")
+
+    async def get_publish_status(self, publish_id):
+        """查询发布状态。"""
+        token = await self._get_access_token()
+        url = f"https://api.weixin.qq.com/cgi-bin/freepublish/get?access_token={token}"
+        payload = {"publish_id": publish_id}
+
+        try:
+            result = await self._post_json(url, payload)
+            return result
+        except aiohttp.ClientError as e:
+            raise Exception(f"查询发布状态时网络错误: {e}")
+
+    async def wait_for_publish_result(self, publish_id, poll_interval=5, timeout=180):
+        """轮询发布状态，直到成功/失败或超时。"""
+        in_progress_status = {1}
+        success_status = {0}
+
+        start = time.time()
+        while True:
+            result = await self.get_publish_status(publish_id)
+            status = result.get("publish_status")
+
+            if status in success_status:
+                article_id = result.get("article_id", "")
+                article_detail = result.get("article_detail", {})
+                article_url = ""
+                if isinstance(article_detail, dict):
+                    article_url = article_detail.get("article_url", "")
+                print(f"发布成功，article_id: {article_id}")
+                if article_url:
+                    print(f"文章链接: {article_url}")
+                return result
+
+            if status not in in_progress_status:
+                raise Exception(f"发布失败或状态异常: {result}")
+
+            if time.time() - start > timeout:
+                raise TimeoutError(
+                    f"等待发布结果超时（>{timeout}秒），请稍后在公众号后台确认，publish_id={publish_id}"
+                )
+
+            print(f"发布处理中，当前状态: {status}，{poll_interval} 秒后重试...")
+            await asyncio.sleep(poll_interval)
 
     async def _delete_single_material(self, session, token, media_id):
         """异步删除单个素材的内部方法"""
@@ -243,6 +387,178 @@ async def clean_all_images(wx_manager):
     print("\n所有可删除的图片素材清理完毕。")
 
 
+def _load_article_content_from_file(content_file):
+    """从本地文件读取文章正文。"""
+    path = Path(content_file).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"未找到正文文件: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def _utf8_truncate(text, max_bytes):
+    """按 UTF-8 字节数截断字符串，避免多字节字符被截断。"""
+    if text is None:
+        return ""
+    raw = str(text).encode("utf-8")
+    if len(raw) <= max_bytes:
+        return str(text)
+    truncated = raw[:max_bytes]
+    while True:
+        try:
+            return truncated.decode("utf-8")
+        except UnicodeDecodeError:
+            truncated = truncated[:-1]
+
+
+def _decode_escaped_unicode(text):
+    """把类似 '\\u4f60\\u597d' 的转义文本还原为可读中文。"""
+    if text is None:
+        return ""
+
+    value = str(text)
+    if not UNICODE_ESCAPE_PATTERN.search(value):
+        return value
+
+    try:
+        decoded = bytes(value, "utf-8").decode("unicode_escape")
+        return decoded
+    except Exception:
+        return value
+
+
+def _normalize_article_fields(article):
+    """对文章字段做微信接口友好的长度处理。"""
+    for field in ("title", "author", "digest", "content"):
+        original = article.get(field, "")
+        normalized = _decode_escaped_unicode(original)
+        if normalized != original:
+            print(f"检测到 {field} 含有转义字符，已自动还原。")
+            article[field] = normalized
+
+    # 微信草稿接口对 author 字段长度较敏感，按 8 字节保守处理。
+    author = article.get("author", "")
+    normalized_author = _utf8_truncate(author, 8)
+    if normalized_author != author:
+        print(f"作者名过长，已自动截断: '{author}' -> '{normalized_author}'")
+        article["author"] = normalized_author
+    return article
+
+
+def build_article_from_config():
+    """从 config.py 读取文章配置并构造微信文章对象。"""
+    content = getattr(cfg, "ARTICLE_CONTENT", "")
+    content_file = getattr(cfg, "ARTICLE_CONTENT_FILE", "")
+    if content_file:
+        content = _load_article_content_from_file(content_file)
+
+    article = {
+        "title": getattr(cfg, "ARTICLE_TITLE", ""),
+        "author": getattr(cfg, "ARTICLE_AUTHOR", ""),
+        "digest": getattr(cfg, "ARTICLE_DIGEST", ""),
+        "content": content,
+        "content_source_url": getattr(cfg, "ARTICLE_SOURCE_URL", ""),
+        "thumb_media_id": getattr(cfg, "ARTICLE_THUMB_MEDIA_ID", ""),
+        "need_open_comment": int(getattr(cfg, "ARTICLE_NEED_OPEN_COMMENT", 0)),
+        "only_fans_can_comment": int(getattr(cfg, "ARTICLE_ONLY_FANS_CAN_COMMENT", 0)),
+    }
+
+    required_fields = ["title", "author", "content", "thumb_media_id"]
+    missing_fields = [field for field in required_fields if not article[field]]
+    if missing_fields:
+        missing_str = ", ".join(missing_fields)
+        raise ValueError(f"文章配置不完整，缺少字段: {missing_str}")
+
+    return _normalize_article_fields(article)
+
+
+def _is_placeholder_media_id(value):
+    """判断是否是占位封面 media_id。"""
+    v = (value or "").strip().lower()
+    return v in {"", "your_thumb_media_id", "media_id", "your_media_id"}
+
+
+def _looks_like_media_id(value):
+    """粗略判断字符串是否像微信公众号素材 media_id。"""
+    v = (value or "").strip()
+    return len(v) > 20 and all(ch not in v for ch in ("\\", "/", ".jpg", ".jpeg", ".png", ".gif"))
+
+
+async def resolve_thumb_media_id(wx_manager):
+    """解析并返回可用的封面 media_id。"""
+    configured_media_id = getattr(cfg, "ARTICLE_THUMB_MEDIA_ID", "")
+    cover_file = getattr(cfg, "ARTICLE_THUMB_IMAGE_FILE", "")
+
+    if cover_file:
+        cover_path = Path(cover_file).expanduser()
+        if cover_path.exists():
+            print(f"检测到本地封面图配置，准备上传: {cover_file}")
+            return await wx_manager.upload_permanent_image(cover_file)
+
+        if _looks_like_media_id(cover_file):
+            print("检测到 ARTICLE_THUMB_IMAGE_FILE 传入了 media_id，已直接作为封面 media_id 使用。")
+            return cover_file
+
+        raise FileNotFoundError(
+            f"ARTICLE_THUMB_IMAGE_FILE 指向的文件不存在: {cover_file}。"
+            "请填写本地图片路径，或改为 ARTICLE_THUMB_MEDIA_ID。"
+        )
+
+    if not _is_placeholder_media_id(configured_media_id):
+        return configured_media_id
+
+    media_id = await wx_manager.get_first_image_media_id()
+    if media_id:
+        print("检测到占位 media_id，已自动使用素材库中的可用 media_id。")
+        return media_id
+
+    raise ValueError(
+        "未找到可用封面 media_id。请在 config.py 中设置 ARTICLE_THUMB_MEDIA_ID，"
+        "或配置 ARTICLE_THUMB_IMAGE_FILE 指向本地封面图。"
+    )
+
+
+async def auto_publish_article(wx_manager, wait_result=True, poll_interval=5, timeout=180):
+    """自动发布单篇公众号文章。"""
+    article = build_article_from_config()
+    article["thumb_media_id"] = await resolve_thumb_media_id(wx_manager)
+    draft_media_id = await wx_manager.add_draft([article])
+    publish_id = await wx_manager.publish_draft(draft_media_id)
+
+    if wait_result:
+        await wx_manager.wait_for_publish_result(
+            publish_id=publish_id,
+            poll_interval=poll_interval,
+            timeout=timeout,
+        )
+    else:
+        print("未等待最终发布结果，可稍后在公众号后台查看发布状态。")
+
+
+async def create_draft_only(wx_manager):
+    """仅创建草稿，不调用发布接口。"""
+    article = build_article_from_config()
+    article["thumb_media_id"] = await resolve_thumb_media_id(wx_manager)
+    draft_media_id = await wx_manager.add_draft([article])
+    print(f"草稿创建完成，可在公众号后台草稿箱查看。media_id: {draft_media_id}")
+
+
+def parse_args():
+    """解析命令行参数。"""
+    parser = argparse.ArgumentParser(description="微信公众号素材清理与图文发布工具")
+    subparsers = parser.add_subparsers(dest="command")
+
+    subparsers.add_parser("clean-images", help="清理所有可删除的永久图片素材")
+    subparsers.add_parser("list-image-media", help="列出账号前20个永久图片素材")
+    subparsers.add_parser("draft-only", help="仅创建草稿，不调用发布接口")
+
+    publish_parser = subparsers.add_parser("publish-article", help="根据 config.py 自动发布一篇公众号文章")
+    publish_parser.add_argument("--no-wait", action="store_true", help="提交发布后不轮询最终结果")
+    publish_parser.add_argument("--poll-interval", type=int, default=5, help="轮询发布状态间隔（秒）")
+    publish_parser.add_argument("--timeout", type=int, default=180, help="等待发布结果超时时间（秒）")
+
+    return parser.parse_args()
+
+
 async def main():
     """主执行函数"""
     if APP_ID == "your_appid" or APP_SECRET == "your_appsecret":
@@ -250,18 +566,53 @@ async def main():
         print("你可以在微信公众号后台 -> 设置与开发 -> 基本配置 中找到它们。")
         return
 
+    args = parse_args()
+    if not args.command:
+        print("未指定命令。")
+        print("可用命令:")
+        print("  python app.py clean-images")
+        print("  python app.py list-image-media")
+        print("  python app.py draft-only")
+        print("  python app.py publish-article")
+        print("  python app.py publish-article --no-wait")
+        return
+
     wx = WxManager(appid=APP_ID, appsecret=APP_SECRET)
     try:
-        # **危险操作**: 下面的函数会删除公众号所有的永久图片素材，请谨慎操作！
-        # **请在执行前确认你真的要删除所有图片！**
-        # 如果确认，请取消下面这行代码的注释
-        await clean_all_images(wx)
+        if args.command == "clean-images":
+            await clean_all_images(wx)
+        elif args.command == "list-image-media":
+            result = await wx.get_permanent_materials(material_type="image", offset=0, count=20)
+            if not result:
+                print("获取图片素材失败。")
+            else:
+                total_count = result.get("total_count", 0)
+                item_count = result.get("item_count", 0)
+                items = result.get("item", [])
+                print(f"图片素材总数: {total_count}")
+                print(f"本次返回: {item_count}")
+                if not items:
+                    print("没有查询到图片素材。")
+                else:
+                    print("\n前20个图片素材:")
+                    for idx, item in enumerate(items, start=1):
+                        media_id = item.get("media_id", "")
+                        name = item.get("name", "")
+                        update_time = item.get("update_time", 0)
+                        print(f"{idx:02d}. media_id={media_id}")
+                        print(f"    name={name}")
+                        print(f"    update_time={update_time}")
+        elif args.command == "draft-only":
+            await create_draft_only(wx)
+        elif args.command == "publish-article":
+            await auto_publish_article(
+                wx_manager=wx,
+                wait_result=not args.no_wait,
+                poll_interval=max(1, args.poll_interval),
+                timeout=max(10, args.timeout),
+            )
 
-        # 如果你只想删除指定的几个图片，可以使用下面的方式：
-        # image_ids_to_delete = ["media_id_1", "media_id_2"]
-        # await wx.delete_materials(image_ids_to_delete)
-        
-        print("\n脚本执行完毕。如果未执行任何操作，请检查代码中的注释。")
+        print("\n脚本执行完毕。")
     finally:
         await wx.close_session()
 

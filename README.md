@@ -1,12 +1,17 @@
 # 微信公众号素材批量清理工具
 
-这是一个用于批量删除微信公众号永久素材（目前主要针对图片）的 Python 脚本。
+这是一个用于微信公众号运营自动化的 Python 脚本，目前支持：
+
+- 批量删除永久图片素材
+- 自动发布公众号图文文章（创建草稿并提交发布）
 
 ## 功能
 
 - 自动获取并管理 `access_token`。
 - 分页获取所有永久图片素材的 `media_id`。
 - 批量删除所有获取到的图片素材。
+- 根据配置自动创建图文草稿并提交发布。
+- 可选轮询发布状态，拿到最终发布结果。
 - 将敏感配置（AppID 和 AppSecret）与主逻辑分离，提高安全性。
 
 ## 使用方法
@@ -19,27 +24,47 @@
 
 2. **安装依赖**
    ```bash
-   pip install requests
+   pip install aiohttp
    ```
 
 3. **配置 AppID 和 AppSecret**
    - 复制 `config.py.template` 文件并重命名为 `config.py`。
    - 打开 `config.py` 文件，将 `your_appid` 和 `your_appsecret` 替换为你的微信公众号的真实 AppID 和 AppSecret。你可以在微信公众号后台的“设置与开发” -> “基本配置”中找到它们。
+   - 如果要发布文章，请继续配置以下字段：
+     - `ARTICLE_TITLE`、`ARTICLE_AUTHOR`
+     - `ARTICLE_THUMB_MEDIA_ID`（封面图 media_id）
+     - `ARTICLE_CONTENT`（HTML正文）或 `ARTICLE_CONTENT_FILE`（本地 UTF-8 文件）
+       - 可选：`ARTICLE_THUMB_IMAGE_FILE`（本地封面图路径，脚本会自动上传并使用返回的 media_id）
 
 4. **执行脚本**
-   - 打开 `app.py` 文件。
-   - **这是一个非常危险的操作，会删除你公众号所有的永久图片素材，请谨慎操作！**
-   - 仔细阅读 `app.py` 文件末尾的说明。如果你确认要删除所有图片，请取消 `clean_all_images(wx)` 这一行的注释。
-   - 运行脚本：
-     ```bash
-     python app.py
-     ```
+      - 列出账号前 20 个图片素材：
+         ```bash
+         python app.py list-image-media
+         ```
+    - 清理图片素材（危险操作）：
+       ```bash
+       python app.py clean-images
+       ```
+    - 自动发布文章：
+       ```bash
+       python app.py publish-article
+       ```
+      - 仅创建草稿（不走发布接口，适合接口权限受限账号）：
+         ```bash
+         python app.py draft-only
+         ```
+    - 推荐做法：配置 `ARTICLE_THUMB_IMAGE_FILE="cover.jpg"`，可避免手动找 `media_id`。
+    - 提交发布后不等待最终结果：
+       ```bash
+       python app.py publish-article --no-wait
+       ```
 
 ## 注意事项
 
 - **请在执行删除操作前务必备份好重要素材！**
 - 脚本默认会删除所有图片类永久素材，执行前请三思。
 - 微信 API 有调用频率限制，脚本中已加入简单的延时处理，但如果素材量巨大，仍需注意可能遇到的频率问题。
+- 自动发布文章依赖公众号接口权限，若返回权限错误，请先确认账号类型和接口授权状态。
 
 ## 许可证
 
