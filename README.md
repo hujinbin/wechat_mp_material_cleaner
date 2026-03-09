@@ -53,6 +53,10 @@
          ```bash
          python app.py draft-only
          ```
+      - 从 JSON 创建草稿（适合 AI 工作流，例如 OpenClaw）：
+         ```bash
+         python app.py draft-from-json --json-file article.json
+         ```
     - 推荐做法：配置 `ARTICLE_THUMB_IMAGE_FILE="cover.jpg"`，可避免手动找 `media_id`。
     - 提交发布后不等待最终结果：
        ```bash
@@ -65,6 +69,31 @@
 - 脚本默认会删除所有图片类永久素材，执行前请三思。
 - 微信 API 有调用频率限制，脚本中已加入简单的延时处理，但如果素材量巨大，仍需注意可能遇到的频率问题。
 - 自动发布文章依赖公众号接口权限，若返回权限错误，请先确认账号类型和接口授权状态。
+
+## OpenClaw 对接示例
+
+让 OpenClaw 产出 UTF-8 的 `article.json`，然后调用本脚本入草稿箱。
+
+单篇文章 JSON 示例：
+
+```json
+{
+   "title": "优惠返利写作示例",
+   "author": "六言",
+   "digest": "一分钟看懂如何领取返利",
+   "content": "<p>这里是 AI 生成的 HTML 正文</p>",
+   "content_source_url": "",
+   "thumb_media_id": "你的封面media_id",
+   "need_open_comment": 0,
+   "only_fans_can_comment": 0
+}
+```
+
+执行命令：
+
+```bash
+python app.py draft-from-json --json-file article.json
+```
 
 ## 许可证
 

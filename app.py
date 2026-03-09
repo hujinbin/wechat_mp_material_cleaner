@@ -462,13 +462,50 @@ def build_article_from_config():
         "only_fans_can_comment": int(getattr(cfg, "ARTICLE_ONLY_FANS_CAN_COMMENT", 0)),
     }
 
+    return prepare_article(article)
+
+
+def prepare_article(article):
+    """标准化并校验单篇文章对象。"""
     required_fields = ["title", "author", "content", "thumb_media_id"]
-    missing_fields = [field for field in required_fields if not article[field]]
+    missing_fields = [field for field in required_fields if not article.get(field)]
     if missing_fields:
         missing_str = ", ".join(missing_fields)
         raise ValueError(f"文章配置不完整，缺少字段: {missing_str}")
 
+    article.setdefault("digest", "")
+    article.setdefault("content_source_url", "")
+    article.setdefault("need_open_comment", 0)
+    article.setdefault("only_fans_can_comment", 0)
+
+    article["need_open_comment"] = int(article.get("need_open_comment", 0))
+    article["only_fans_can_comment"] = int(article.get("only_fans_can_comment", 0))
+
     return _normalize_article_fields(article)
+
+
+def load_articles_from_json(json_file):
+    """从 UTF-8 JSON 文件加载文章。支持单篇或 articles 列表。"""
+    path = Path(json_file).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"JSON 文件不存在: {path}")
+
+    raw = path.read_text(encoding="utf-8")
+    payload = json.loads(raw)
+
+    if isinstance(payload, dict) and "articles" in payload:
+        articles = payload["articles"]
+    elif isinstance(payload, dict):
+        articles = [payload]
+    elif isinstance(payload, list):
+        articles = payload
+    else:
+        raise ValueError("JSON 格式错误，必须是对象、数组，或包含 articles 字段的对象。")
+
+    if not articles:
+        raise ValueError("JSON 中没有可用文章。")
+
+    return [prepare_article(article) for article in articles]
 
 
 def _is_placeholder_media_id(value):
@@ -542,6 +579,13 @@ async def create_draft_only(wx_manager):
     print(f"草稿创建完成，可在公众号后台草稿箱查看。media_id: {draft_media_id}")
 
 
+async def create_draft_from_json(wx_manager, json_file):
+    """从 JSON 文件创建草稿，不调用发布接口。"""
+    articles = load_articles_from_json(json_file)
+    draft_media_id = await wx_manager.add_draft(articles)
+    print(f"草稿创建完成（来源 JSON），media_id: {draft_media_id}")
+
+
 def parse_args():
     """解析命令行参数。"""
     parser = argparse.ArgumentParser(description="微信公众号素材清理与图文发布工具")
@@ -550,6 +594,8 @@ def parse_args():
     subparsers.add_parser("clean-images", help="清理所有可删除的永久图片素材")
     subparsers.add_parser("list-image-media", help="列出账号前20个永久图片素材")
     subparsers.add_parser("draft-only", help="仅创建草稿，不调用发布接口")
+    json_parser = subparsers.add_parser("draft-from-json", help="从 UTF-8 JSON 创建草稿，不调用发布接口")
+    json_parser.add_argument("--json-file", required=True, help="文章 JSON 文件路径")
 
     publish_parser = subparsers.add_parser("publish-article", help="根据 config.py 自动发布一篇公众号文章")
     publish_parser.add_argument("--no-wait", action="store_true", help="提交发布后不轮询最终结果")
@@ -573,6 +619,7 @@ async def main():
         print("  python app.py clean-images")
         print("  python app.py list-image-media")
         print("  python app.py draft-only")
+        print("  python app.py draft-from-json --json-file article.json")
         print("  python app.py publish-article")
         print("  python app.py publish-article --no-wait")
         return
@@ -604,6 +651,8 @@ async def main():
                         print(f"    update_time={update_time}")
         elif args.command == "draft-only":
             await create_draft_only(wx)
+        elif args.command == "draft-from-json":
+            await create_draft_from_json(wx, args.json_file)
         elif args.command == "publish-article":
             await auto_publish_article(
                 wx_manager=wx,
