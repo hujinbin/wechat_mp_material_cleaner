@@ -1,6 +1,7 @@
 import asyncio
 import aiohttp
 import argparse
+import html
 import json
 import re
 import sys
@@ -444,6 +445,142 @@ def _normalize_article_fields(article):
     return article
 
 
+def _supports_interactive_input():
+    """判断当前运行环境是否支持交互输入。"""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _is_missing_thumb_media_id(value):
+    """判断封面 media_id 是否为空或占位值。"""
+    return _is_placeholder_media_id(value)
+
+
+def _prompt_thumb_media_id(article_index=1):
+    """交互式询问封面 media_id。"""
+    if not _supports_interactive_input():
+        raise ValueError(
+            "检测到文章缺少 thumb_media_id，且当前是非交互环境。"
+            "请在 JSON 中补充 thumb_media_id，或使用 --thumb-media-id 传入默认值。"
+        )
+
+    while True:
+        user_input = input(f"文章 #{article_index} 缺少 thumb_media_id，请输入可用 media_id: ").strip()
+        if user_input and not _is_placeholder_media_id(user_input):
+            return user_input
+        print("输入无效，请重新输入有效的 media_id。")
+
+
+def _ensure_thumb_media_ids(articles, default_thumb_media_id="", interactive=True):
+    """确保每篇文章都有可用的 thumb_media_id。"""
+    default_value = (default_thumb_media_id or "").strip()
+    has_default = bool(default_value) and not _is_placeholder_media_id(default_value)
+
+    for idx, article in enumerate(articles, start=1):
+        thumb_media_id = (article.get("thumb_media_id") or "").strip()
+        if not _is_missing_thumb_media_id(thumb_media_id):
+            article["thumb_media_id"] = thumb_media_id
+            continue
+
+        if has_default:
+            article["thumb_media_id"] = default_value
+            print(f"文章 #{idx} 缺少 thumb_media_id，已使用命令行默认值。")
+            continue
+
+        if interactive:
+            article["thumb_media_id"] = _prompt_thumb_media_id(article_index=idx)
+            continue
+
+        raise ValueError(
+            f"文章 #{idx} 缺少 thumb_media_id。"
+            "请在 JSON 中补充，或使用 --thumb-media-id，或移除 --no-interactive。"
+        )
+
+    return articles
+
+
+def _render_markdown_inline(text):
+    """渲染少量常见 Markdown 行内语法。"""
+    escaped = html.escape(text.strip())
+    escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+    escaped = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"\*([^*]+)\*", r"<em>\1</em>", escaped)
+    escaped = re.sub(
+        r"\[([^\]]+)\]\((https?://[^)]+)\)",
+        r'<a href="\2" target="_blank" rel="noopener noreferrer">\1</a>',
+        escaped,
+    )
+    return escaped
+
+
+def _basic_markdown_to_html(markdown_text):
+    """无第三方依赖时的基础 Markdown 转 HTML。"""
+    lines = markdown_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    blocks = []
+    paragraph_lines = []
+    in_list = False
+
+    def flush_paragraph():
+        nonlocal paragraph_lines
+        if paragraph_lines:
+            paragraph = " ".join(_render_markdown_inline(line) for line in paragraph_lines if line.strip())
+            if paragraph:
+                blocks.append(f"<p>{paragraph}</p>")
+            paragraph_lines = []
+
+    def close_list():
+        nonlocal in_list
+        if in_list:
+            blocks.append("</ul>")
+            in_list = False
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            flush_paragraph()
+            close_list()
+            continue
+
+        heading_match = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if heading_match:
+            flush_paragraph()
+            close_list()
+            level = len(heading_match.group(1))
+            content = _render_markdown_inline(heading_match.group(2))
+            blocks.append(f"<h{level}>{content}</h{level}>")
+            continue
+
+        list_match = re.match(r"^[-*+]\s+(.+)$", stripped)
+        if list_match:
+            flush_paragraph()
+            if not in_list:
+                blocks.append("<ul>")
+                in_list = True
+            item = _render_markdown_inline(list_match.group(1))
+            blocks.append(f"<li>{item}</li>")
+            continue
+
+        close_list()
+        paragraph_lines.append(stripped)
+
+    flush_paragraph()
+    close_list()
+    return "\n".join(blocks)
+
+
+def markdown_to_html(markdown_text):
+    """Markdown 转 HTML。优先使用 markdown 库，缺失时回退到内置转换器。"""
+    try:
+        import markdown as markdown_lib  # type: ignore
+
+        return markdown_lib.markdown(
+            markdown_text,
+            extensions=["extra", "tables", "sane_lists"],
+            output_format="xhtml",
+        )
+    except Exception:
+        return _basic_markdown_to_html(markdown_text)
+
+
 def build_article_from_config():
     """从 config.py 读取文章配置并构造微信文章对象。"""
     content = getattr(cfg, "ARTICLE_CONTENT", "")
@@ -465,9 +602,42 @@ def build_article_from_config():
     return prepare_article(article)
 
 
-def prepare_article(article):
+def build_article_from_markdown(
+    markdown_file,
+    title,
+    author,
+    thumb_media_id="",
+    digest="",
+    content_source_url="",
+    need_open_comment=0,
+    only_fans_can_comment=0,
+):
+    """从 Markdown 文件构造单篇草稿文章。"""
+    md_path = Path(markdown_file).expanduser()
+    if not md_path.exists():
+        raise FileNotFoundError(f"Markdown 文件不存在: {md_path}")
+
+    markdown_content = md_path.read_text(encoding="utf-8")
+    html_content = markdown_to_html(markdown_content)
+
+    article = {
+        "title": title,
+        "author": author,
+        "digest": digest,
+        "content": html_content,
+        "content_source_url": content_source_url,
+        "thumb_media_id": thumb_media_id,
+        "need_open_comment": int(need_open_comment),
+        "only_fans_can_comment": int(only_fans_can_comment),
+    }
+    return prepare_article(article, require_thumb_media_id=False)
+
+
+def prepare_article(article, require_thumb_media_id=True):
     """标准化并校验单篇文章对象。"""
-    required_fields = ["title", "author", "content", "thumb_media_id"]
+    required_fields = ["title", "author", "content"]
+    if require_thumb_media_id:
+        required_fields.append("thumb_media_id")
     missing_fields = [field for field in required_fields if not article.get(field)]
     if missing_fields:
         missing_str = ", ".join(missing_fields)
@@ -475,6 +645,7 @@ def prepare_article(article):
 
     article.setdefault("digest", "")
     article.setdefault("content_source_url", "")
+    article.setdefault("thumb_media_id", "")
     article.setdefault("need_open_comment", 0)
     article.setdefault("only_fans_can_comment", 0)
 
@@ -505,7 +676,7 @@ def load_articles_from_json(json_file):
     if not articles:
         raise ValueError("JSON 中没有可用文章。")
 
-    return [prepare_article(article) for article in articles]
+    return [prepare_article(article, require_thumb_media_id=False) for article in articles]
 
 
 def _is_placeholder_media_id(value):
@@ -579,11 +750,48 @@ async def create_draft_only(wx_manager):
     print(f"草稿创建完成，可在公众号后台草稿箱查看。media_id: {draft_media_id}")
 
 
-async def create_draft_from_json(wx_manager, json_file):
+async def create_draft_from_json(wx_manager, json_file, default_thumb_media_id="", interactive=True):
     """从 JSON 文件创建草稿，不调用发布接口。"""
     articles = load_articles_from_json(json_file)
+    articles = _ensure_thumb_media_ids(
+        articles,
+        default_thumb_media_id=default_thumb_media_id,
+        interactive=interactive,
+    )
     draft_media_id = await wx_manager.add_draft(articles)
     print(f"草稿创建完成（来源 JSON），media_id: {draft_media_id}")
+
+
+async def create_draft_from_markdown(
+    wx_manager,
+    markdown_file,
+    title,
+    author,
+    thumb_media_id="",
+    digest="",
+    content_source_url="",
+    need_open_comment=0,
+    only_fans_can_comment=0,
+    interactive=True,
+):
+    """从 Markdown 文件创建草稿，不调用发布接口。"""
+    article = build_article_from_markdown(
+        markdown_file=markdown_file,
+        title=title,
+        author=author,
+        thumb_media_id=thumb_media_id,
+        digest=digest,
+        content_source_url=content_source_url,
+        need_open_comment=need_open_comment,
+        only_fans_can_comment=only_fans_can_comment,
+    )
+    articles = _ensure_thumb_media_ids(
+        [article],
+        default_thumb_media_id=thumb_media_id,
+        interactive=interactive,
+    )
+    draft_media_id = await wx_manager.add_draft(articles)
+    print(f"草稿创建完成（来源 Markdown），media_id: {draft_media_id}")
 
 
 def parse_args():
@@ -596,6 +804,19 @@ def parse_args():
     subparsers.add_parser("draft-only", help="仅创建草稿，不调用发布接口")
     json_parser = subparsers.add_parser("draft-from-json", help="从 UTF-8 JSON 创建草稿，不调用发布接口")
     json_parser.add_argument("--json-file", required=True, help="文章 JSON 文件路径")
+    json_parser.add_argument("--thumb-media-id", default="", help="为缺失封面的文章提供默认 thumb_media_id")
+    json_parser.add_argument("--no-interactive", action="store_true", help="禁用缺失字段时的交互提问")
+
+    md_parser = subparsers.add_parser("draft-from-markdown", help="从 Markdown 自动转 HTML 并创建草稿")
+    md_parser.add_argument("--md-file", required=True, help="Markdown 文件路径（UTF-8）")
+    md_parser.add_argument("--title", required=True, help="文章标题")
+    md_parser.add_argument("--author", required=True, help="作者")
+    md_parser.add_argument("--thumb-media-id", default="", help="封面 thumb_media_id（缺失时可交互输入）")
+    md_parser.add_argument("--digest", default="", help="文章摘要")
+    md_parser.add_argument("--content-source-url", default="", help="原文链接")
+    md_parser.add_argument("--need-open-comment", type=int, default=0, help="评论设置: 0 关闭, 1 开启")
+    md_parser.add_argument("--only-fans-can-comment", type=int, default=0, help="仅粉丝可评论: 0 否, 1 是")
+    md_parser.add_argument("--no-interactive", action="store_true", help="禁用缺失字段时的交互提问")
 
     publish_parser = subparsers.add_parser("publish-article", help="根据 config.py 自动发布一篇公众号文章")
     publish_parser.add_argument("--no-wait", action="store_true", help="提交发布后不轮询最终结果")
@@ -620,6 +841,7 @@ async def main():
         print("  python app.py list-image-media")
         print("  python app.py draft-only")
         print("  python app.py draft-from-json --json-file article.json")
+        print("  python app.py draft-from-markdown --md-file article.md --title 标题 --author 作者")
         print("  python app.py publish-article")
         print("  python app.py publish-article --no-wait")
         return
@@ -652,7 +874,25 @@ async def main():
         elif args.command == "draft-only":
             await create_draft_only(wx)
         elif args.command == "draft-from-json":
-            await create_draft_from_json(wx, args.json_file)
+            await create_draft_from_json(
+                wx_manager=wx,
+                json_file=args.json_file,
+                default_thumb_media_id=args.thumb_media_id,
+                interactive=not args.no_interactive,
+            )
+        elif args.command == "draft-from-markdown":
+            await create_draft_from_markdown(
+                wx_manager=wx,
+                markdown_file=args.md_file,
+                title=args.title,
+                author=args.author,
+                thumb_media_id=args.thumb_media_id,
+                digest=args.digest,
+                content_source_url=args.content_source_url,
+                need_open_comment=1 if int(args.need_open_comment) else 0,
+                only_fans_can_comment=1 if int(args.only_fans_can_comment) else 0,
+                interactive=not args.no_interactive,
+            )
         elif args.command == "publish-article":
             await auto_publish_article(
                 wx_manager=wx,

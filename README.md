@@ -57,6 +57,18 @@
          ```bash
          python app.py draft-from-json --json-file article.json
          ```
+         - JSON 缺失 `thumb_media_id` 时，脚本会自动交互提问：
+            ```bash
+            python app.py draft-from-json --json-file article.json
+            ```
+         - 非交互场景（CI/批处理）可显式传入默认封面：
+            ```bash
+            python app.py draft-from-json --json-file article.json --thumb-media-id 你的media_id --no-interactive
+            ```
+         - 从 Markdown 自动转 HTML 并创建草稿：
+            ```bash
+            python app.py draft-from-markdown --md-file article.md --title "文章标题" --author "作者"
+            ```
     - 推荐做法：配置 `ARTICLE_THUMB_IMAGE_FILE="cover.jpg"`，可避免手动找 `media_id`。
     - 提交发布后不等待最终结果：
        ```bash
@@ -94,6 +106,45 @@
 ```bash
 python app.py draft-from-json --json-file article.json
 ```
+
+## OpenClaw Skill 用法
+
+仓库已提供可直接复用的 Skill：
+
+- `.claude/skills/wechat-mp-material-cleaner/SKILL.md`
+- `.claude/skills/wechat-mp-markdown-draft/SKILL.md`
+
+也提供了可直接调用的命令文件：
+
+- `.claude/commands/wechat-draft.md`（在支持 slash command 的环境中可用 `/wechat-draft`）
+
+以及一个可复用 Prompt：
+
+- `.claude/prompts/wechat-draft.prompt.md`
+- `.claude/prompts/wechat-draft-batch.prompt.md`（批处理/CI，默认非交互）
+
+推荐触发词示例：
+
+- `请用 wechat-mp-material-cleaner skill 生成公众号草稿 JSON，并保存为 article.json`
+- `根据这段内容生成 article.json，然后执行 draft-from-json 入草稿箱`
+
+OpenClaw 执行链路建议：
+
+1. 让模型按 Skill 规则生成 UTF-8 `article.json`。
+2. 在仓库根目录执行：
+   ```bash
+   python app.py draft-from-json --json-file article.json
+   ```
+3. 查看终端输出中的草稿 `media_id`，并到公众号后台草稿箱确认。
+
+Markdown 链路示例：
+
+1. 保存 `article.md`（UTF-8）。
+2. 执行：
+   ```bash
+   python app.py draft-from-markdown --md-file article.md --title "文章标题" --author "作者"
+   ```
+3. 如缺失 `thumb_media_id`，脚本会自动提示输入；批处理场景建议加 `--thumb-media-id ... --no-interactive`。
 
 ## 许可证
 
